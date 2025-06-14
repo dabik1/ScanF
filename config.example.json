@@ -1,0 +1,29 @@
+{
+    "telegram_token": "1234567890:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "telegram_chat_id": "-1001234567890",
+    "camera_ip": "192.168.1.100",
+    "camera_login": "admin",
+    "camera_password": "password123",
+    "recorder_ip": "192.168.1.200",
+    "recorder_login": "admin",
+    "recorder_password": "recorder_password",
+    "recorder_port": "554",
+    "recorder_channel": "1",
+    "recorder_rtsp_template": "hikvision",
+    "use_recorder": true,
+    "save_folder": "C:\\Users\\YourName\\Desktop\\SkanerFoto",
+    "packers": [
+        {
+            "id": "123",
+            "name": "Іван Петренко"
+        },
+        {
+            "id": "456", 
+            "name": "Марія Іваненко"
+        },
+        {
+            "id": "789",
+            "name": "Олександр Сидоренко"
+        }
+    ]
+}
