@@ -1,0 +1,1694 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Інструмент пакувальника v3.0 - RTSP скриншоти
+Програма для сканування штрихкодів з автоматичними скриншотами через RTSP
+"""
+
+# ============================================================================
+# ІМПОРТИ
+# ============================================================================
+
+# Стандартні бібліотеки Python
+import tkinter as tk
+from tkinter import messagebox, simpledialog, ttk, filedialog
+import json
+import os
+import time
+import re
+import logging
+import threading
+import io
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# Сторонні бібліотеки
+import requests
+from openpyxl import Workbook, load_workbook
+from PIL import Image, ImageTk
+
+# Імпорти з перевіркою доступності
+try:
+    import cv2
+    OPENCV_AVAILABLE = True
+except ImportError:
+    OPENCV_AVAILABLE = False
+    print("OpenCV не встановлено. Встановіть: pip install opencv-python")
+
+try:
+    import barcode
+    from barcode.writer import ImageWriter
+    BARCODE_AVAILABLE = True
+except ImportError:
+    BARCODE_AVAILABLE = False
+    print("Модуль barcode не встановлено. Встановіть: pip install python-barcode[images]")
+
+# ============================================================================
+# КОНСТАНТИ ТА КОНФІГУРАЦІЯ
+# ============================================================================
+
+CONFIG_FILE = "config.json"
+LOG_FILE = "app.log"
+
+# Отримуємо шлях до робочого столу за замовчуванням
+DEFAULT_DESKTOP_PATH = Path.home() / "Desktop"
+DEFAULT_SAVE_FOLDER = DEFAULT_DESKTOP_PATH / "SkanerFoto"
+
+# Перевірка доступності RTSP (залежить від OpenCV)
+RTSP_AVAILABLE = OPENCV_AVAILABLE
+
+# ============================================================================
+# НАЛАШТУВАННЯ ЛОГУВАННЯ
+# ============================================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+
+# ============================================================================
+# УТИЛІТАРНІ ФУНКЦІЇ
+# ============================================================================
+
+def validate_ip_address(ip):
+    """Перевірка коректності IP-адреси"""
+    pattern = r'^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
+    return re.match(pattern, ip) is not     def add_packer(self):
+        """Додавання нового пакувальника"""
+        pid = simpledialog.askstring("ID пакувальника", "Введіть ID пакувальника (будь-яка довжина):")
+        if not pid:
+            return
+        
+        # Видаляємо пробіли та перевіряємо, що ID не порожній
+        pid = pid.strip()
+        if not pid:
+            messagebox.showerror("Помилка", "ID не може бути порожнім!")
+            return
+        
+        # Перевірити унікальність ID
+        if any(p["id"] == pid for p in self.config["packers"]):
+            messagebox.showerror("Помилка", "Пакувальник з таким ID вже існує!")
+            return
+        
+        name = simpledialog.askstring("Ім'я пакувальника", "Введіть ім'я пакувальника:")
+        if name:
+            self.config["packers"].append({"id": pid, "name": name.strip()})
+            self.refresh_packers()
+            logging.info(f"Додано пакувальника: {name} (ID {pid}).")
+            self.status_var.set(f"Додано пакувальника: {name}")
+
+        
+        now_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        logging.info(f"Отримано код: {code}")
+
+        # Перевірка на ID пакувальника (перевіряємо серед збережених)
+        packer = next((p for p in self.config["packers"] if p["id"] == code), None)
+        if packer:
+            self.current_packer = packer
+            # Створити папку sessions
+            save_folder = Path(self.config.get("save_folder", str(DEFAULT_SAVE_FOLDER)))
+            sessions_folder = save_folder / "sessions"
+            sessions_folder.mkdir(parents=True, exist_ok=True)
+            self.session_folder = sessions_folder / f"{now_str}_{packer['name']}_{packer['id']}"
+            try:
+                self.session_folder.mkdir(exist_ok=True)
+                logging.info(f"Обрано пакувальника: {packer['name']} (ID {packer['id']}). Створена сесійна папка {self.session_folder}")
+                send_telegram_message(self.config["telegram_token"], self.config["telegram_chat_id"],
+                                      f"🧑‍🏭 Пакувальник {packer['name']} (#{packer['id']}) почав роботу.")
+                return f"Обрано пакувальника: {packer['name']}"
+            except Exception as e:
+                logging.error(f"Помилка створення папки сесії: {e}")
+                return "Помилка створення папки сесії"
+
+        # Обробка штрихкода товару
+        if self.current_packer:
+            return self.process_product_barcode(code)
+        else:
+            logging.warning("Спочатку проскануйте ID пакувальника!")
+            return "Спочатку проскануйте ID пакувальника!"
+
+    # ========================================================================
+    # МЕТОДИ ЗБЕРЕЖЕННЯ НАЛАШТУВАНЬ
+    # ========================================================================
+
+    def save_all(self):
+        """Збереження всіх основних налаштувань"""
+        # Валідація даних
+        ip = self.ip_entry.get().strip()
+        if ip and not validate_ip_address(ip):
+            messagebox.showerror("Помилка", "Некоректна IP-адреса камери!")
+            return
+        
+        # Валідація шляху збереження
+        save_path = self.save_path_var.get()
+        if not save_path:
+            messagebox.showerror("Помилка", "Оберіть папку для збереження!")
+            return
+        
+        self.config["camera_ip"] = ip
+        self.config["camera_login"] = self.login_entry.get().strip()
+        self.config["camera_password"] = self.pass_entry.get()
+        self.config["use_recorder"] = self.use_recorder_var.get()
+        self.config["save_folder"] = save_path
+        
+        # Створюємо папку збереження
+        ensure_save_folder(save_path)
+        
+        if save_config(self.config):
+            self.processor = BarcodeProcessor(self.config)
+            logging.info("Збережено всі налаштування.")
+            messagebox.showinfo("✅ Збережено", "Налаштування успішно збережено!")
+            self.status_var.set("Налаштування збережено")
+        else:
+            messagebox.showerror("❌ Помилка", "Не вдалося зберегти налаштування!")
+            self.status_var.set("Помилка збереження")
+
+    def save_telegram_settings(self):
+        """Збереження налаштувань Telegram"""
+        self.config["telegram_token"] = self.token_entry.get().strip()
+        self.config["telegram_chat_id"] = self.chat_entry.get().strip()
+        
+        if save_config(self.config):
+            self.processor = BarcodeProcessor(self.config)
+            logging.info("Збережено налаштування Telegram.")
+            messagebox.showinfo("✅ Збережено", "Налаштування Telegram успішно збережено!")
+            self.status_var.set("Налаштування Telegram збережено")
+        else:
+            messagebox.showerror("❌ Помилка", "Не вдалося зберегти налаштування!")
+            self.status_var.set("Помилка збереження")
+
+def cleanup_temp_files():
+    """Очищення старих тимчасових файлів"""
+    try:
+        save_folder = Path(get_current_save_folder())
+        temp_folder = save_folder / "temp"
+        if temp_folder.exists():
+            for file_path in temp_folder.iterdir():
+                if file_path.is_file():
+                    # Видалити файли старші 1 години
+                    if time.time() - file_path.stat().st_ctime > 3600:
+                        file_path.unlink()
+                        logging.info(f"Видалено старий тимчасовий файл: {file_path}")
+    except Exception as e:
+        logging.error(f"Помилка очищення тимчасових файлів: {e}")
+
+def cleanup_old_files():
+    """Очищення файлів старше 2 тижнів"""
+    try:
+        save_folder = Path(get_current_save_folder())
+        two_weeks_ago = datetime.now() - timedelta(weeks=2)
+        deleted_count = 0
+        
+        # Очищення папки sessions
+        sessions_folder = save_folder / "sessions"
+        if sessions_folder.exists():
+            for session_path in sessions_folder.iterdir():
+                if session_path.is_dir():
+                    # Перевіряємо дату створення папки
+                    if datetime.fromtimestamp(session_path.stat().st_ctime) < two_weeks_ago:
+                        # Видаляємо всі файли в папці
+                        for file_path in session_path.iterdir():
+                            if file_path.is_file():
+                                file_path.unlink()
+                                deleted_count += 1
+                        # Видаляємо саму папку, якщо вона порожня
+                        try:
+                            session_path.rmdir()
+                            logging.info(f"Видалено папку сесії: {session_path}")
+                        except OSError:
+                            logging.warning(f"Папка не видалена (не порожня): {session_path}")
+                    else:
+                        # Перевіряємо файли в папці
+                        for file_path in session_path.iterdir():
+                            if file_path.is_file():
+                                if datetime.fromtimestamp(file_path.stat().st_ctime) < two_weeks_ago:
+                                    file_path.unlink()
+                                    deleted_count += 1
+        
+        # Очищення папки temp
+        temp_folder = save_folder / "temp"
+        if temp_folder.exists():
+            for file_path in temp_folder.iterdir():
+                if file_path.is_file():
+                    if datetime.fromtimestamp(file_path.stat().st_ctime) < two_weeks_ago:
+                        file_path.unlink()
+                        deleted_count += 1
+        
+        logging.info(f"Очищення завершено. Видалено файлів: {deleted_count}")
+        return deleted_count
+        
+    except Exception as e:
+        logging.error(f"Помилка очищення старих файлів: {e}")
+        return -1
+
+# ============================================================================
+# ФУНКЦІЇ КОНФІГУРАЦІЇ
+# ============================================================================
+
+def load_config():
+    """Завантаження конфігурації з файлу"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                logging.info("Конфігурація завантажена з файлу.")
+                return config
+        except (json.JSONDecodeError, Exception) as e:
+            logging.error(f"Помилка читання конфігурації: {e}")
+            return create_default_config()
+    else:
+        logging.info("Файл конфігурації не знайдено, створена дефолтна структура.")
+        return create_default_config()
+
+def create_default_config():
+    """Створення конфігурації за замовчуванням"""
+    return {
+        "telegram_token": "",
+        "telegram_chat_id": "",
+        "camera_ip": "",
+        "camera_login": "",
+        "camera_password": "",
+        "recorder_ip": "",
+        "recorder_login": "",
+        "recorder_password": "",
+        "recorder_port": "554",
+        "recorder_channel": "1",
+        "recorder_rtsp_template": "hikvision",
+        "use_recorder": True,  # Використовувати реєстратор замість окремої камери
+        "save_folder": str(DEFAULT_SAVE_FOLDER),
+        "packers": []
+    }
+
+def save_config(config):
+    """Збереження конфігурації у файл"""
+    try:
+        os.makedirs(os.path.dirname(CONFIG_FILE) if os.path.dirname(CONFIG_FILE) else ".", exist_ok=True)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+        logging.info("Конфігурація збережена у файл.")
+        return True
+    except Exception as e:
+        logging.error(f"Помилка збереження конфігурації: {e}")
+        return False
+
+def ensure_save_folder(folder_path):
+    """Створення папки для збереження"""
+    try:
+        Path(folder_path).mkdir(parents=True, exist_ok=True)
+        logging.info(f"Папка для збереження: {folder_path}")
+        return True
+    except Exception as e:
+        logging.error(f"Помилка створення папки збереження: {e}")
+        return False
+
+def get_current_save_folder():
+    """Отримання поточної папки збереження з конфігурації"""
+    config = load_config()
+    return config.get("save_folder", str(DEFAULT_SAVE_FOLDER))
+
+# ============================================================================
+# ФУНКЦІЇ РОБОТИ З ШТРИХКОДАМИ
+# ============================================================================
+
+def generate_barcode_image(code):
+    """Генерація штрихкода в пам'яті (без збереження)"""
+    if not BARCODE_AVAILABLE:
+        return None
+    
+    try:
+        # Генеруємо штрихкод Code128
+        code128 = barcode.get_barcode_class('code128')
+        barcode_instance = code128(code, writer=ImageWriter())
+        
+        # Зберігаємо в BytesIO (в пам'яті)
+        buffer = io.BytesIO()
+        barcode_instance.write(buffer)
+        buffer.seek(0)
+        
+        # Відкриваємо як PIL Image
+        img = Image.open(buffer)
+        
+        logging.info(f"Штрихкод згенеровано в пам'яті для коду: {code}")
+        return img
+        
+    except Exception as e:
+        logging.error(f"Помилка генерації штрихкода: {e}")
+        return None
+
+# ============================================================================
+# ФУНКЦІЇ РОБОТИ З RTSP
+# ============================================================================
+
+def get_rtsp_templates():
+    """Шаблони RTSP URL для різних виробників"""
+    return {
+        "hikvision": {
+            "name": "Hikvision",
+            "main": "rtsp://{login}:{password}@{ip}:{port}/Streaming/Channels/{channel}01",
+            "sub": "rtsp://{login}:{password}@{ip}:{port}/Streaming/Channels/{channel}02"
+        },
+        "dahua": {
+            "name": "Dahua",
+            "main": "rtsp://{login}:{password}@{ip}:{port}/cam/realmonitor?channel={channel}&subtype=0",
+            "sub": "rtsp://{login}:{password}@{ip}:{port}/cam/realmonitor?channel={channel}&subtype=1"
+        },
+        "generic": {
+            "name": "Загальний",
+            "main": "rtsp://{login}:{password}@{ip}:{port}/live/ch{channel}",
+            "sub": "rtsp://{login}:{password}@{ip}:{port}/live/ch{channel}_sub"
+        },
+        "axis": {
+            "name": "Axis",
+            "main": "rtsp://{login}:{password}@{ip}:{port}/axis-media/media.amp?videocodec=h264&resolution=1920x1080",
+            "sub": "rtsp://{login}:{password}@{ip}:{port}/axis-media/media.amp?videocodec=h264&resolution=640x480"
+        },
+        "foscam": {
+            "name": "Foscam",
+            "main": "rtsp://{login}:{password}@{ip}:{port}/videoMain",
+            "sub": "rtsp://{login}:{password}@{ip}:{port}/videoSub"
+        }
+    }
+
+def test_rtsp_connection(ip, port, login, password, template, channel):
+    """Тестування RTSP підключення"""
+    if not RTSP_AVAILABLE:
+        return False, "OpenCV не встановлено. Встановіть: pip install opencv-python"
+    
+    try:
+        templates = get_rtsp_templates()
+        
+        if template not in templates:
+            return False, f"Невідомий шаблон: {template}"
+        
+        # Генеруємо RTSP URL
+        rtsp_data = templates[template]
+        rtsp_url = rtsp_data["main"].format(
+            login=login, 
+            password=password, 
+            ip=ip, 
+            port=port, 
+            channel=channel
+        )
+        
+        logging.info(f"[RTSP Test] Тестування: {rtsp_url}")
+        
+        # Тестуємо підключення
+        cap = cv2.VideoCapture(rtsp_url)
+        
+        if not cap.isOpened():
+            cap.release()
+            return False, f"❌ Не вдалося підключитися до RTSP потоку\n\nURL: {rtsp_url}\n\n🔧 Перевірте:\n• IP-адресу та порт\n• Логін та пароль\n• Номер каналу\n• Налаштування мережі"
+        
+        # Спробуємо прочитати кадр
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret or frame is None:
+            return False, f"❌ RTSP потік підключено, але немає відео\n\nURL: {rtsp_url}\n\n🔧 Можливі причини:\n• Канал вимкнений\n• Проблеми з кодеком\n• Потік зайнятий іншим клієнтом"
+        
+        height, width = frame.shape[:2]
+        info = f"✅ RTSP підключення успішне!\n\n"
+        info += f"Виробник: {rtsp_data['name']}\n"
+        info += f"URL: {rtsp_url}\n"
+        info += f"Розширення: {width}x{height}\n"
+        info += f"Канал: {channel}"
+        
+        return True, info
+        
+    except Exception as e:
+        return False, f"Помилка RTSP тестування: {str(e)}"
+
+def get_rtsp_screenshot(ip, port, login, password, template, channel):
+    """Отримання скриншота з RTSP потоку реєстратора"""
+    if not RTSP_AVAILABLE:
+        logging.error("[RTSP] OpenCV не встановлено")
+        return None
+    
+    try:
+        templates = get_rtsp_templates()
+        
+        if template not in templates:
+            logging.error(f"[RTSP] Невідомий шаблон: {template}")
+            return None
+        
+        # Генеруємо RTSP URL (спочатку основний потік, потім субпотік)
+        rtsp_data = templates[template]
+        rtsp_urls = [
+            rtsp_data["main"].format(login=login, password=password, ip=ip, port=port, channel=channel),
+            rtsp_data["sub"].format(login=login, password=password, ip=ip, port=port, channel=channel)
+        ]
+        
+        for rtsp_url in rtsp_urls:
+            try:
+                logging.info(f"[RTSP Screenshot] Спроба: {rtsp_url}")
+                
+                cap = cv2.VideoCapture(rtsp_url)
+                
+                if not cap.isOpened():
+                    logging.warning(f"[RTSP Screenshot] Не вдалося відкрити: {rtsp_url}")
+                    continue
+                
+                # Читаємо декілька кадрів для стабілізації
+                for i in range(5):
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                
+                cap.release()
+                
+                if ret and frame is not None:
+                    # Створити папку temp, якщо не існує
+                    save_folder = Path(get_current_save_folder()) / "temp"
+                    save_folder.mkdir(exist_ok=True)
+                    screenshot_path = save_folder / f"rtsp_screenshot_{int(time.time())}.jpg"
+                    
+                    # Зберігаємо скриншот
+                    cv2.imwrite(str(screenshot_path), frame)
+                    
+                    if screenshot_path.exists() and screenshot_path.stat().st_size > 1024:
+                        logging.info(f"[RTSP Screenshot] Скриншот отримано: {screenshot_path}")
+                        return str(screenshot_path)
+                    else:
+                        if screenshot_path.exists():
+                            screenshot_path.unlink()
+                        logging.warning(f"[RTSP Screenshot] Файл занадто малий")
+                else:
+                    logging.warning(f"[RTSP Screenshot] Не вдалося прочитати кадр з {rtsp_url}")
+                
+            except Exception as e:
+                logging.error(f"[RTSP Screenshot] Помилка для {rtsp_url}: {e}")
+                continue
+        
+        logging.error("[RTSP Screenshot] Всі спроби отримання скриншота невдалі")
+        return None
+        
+    except Exception as e:
+        logging.error(f"[RTSP Screenshot] Загальна помилка: {e}")
+        return None
+
+# ============================================================================
+# ФУНКЦІЇ РОБОТИ З КАМЕРОЮ
+# ============================================================================
+
+def test_camera_connection_advanced(ip, login, password):
+    """Розширене тестування підключення до камери"""
+    if not validate_ip_address(ip):
+        return False, "Некоректна IP-адреса"
+    
+    # Список можливих URL для різних типів камер
+    test_urls = [
+        f"http://{ip}/cgi-bin/snapshot.cgi",  # Стандартний CGI
+        f"http://{ip}/snapshot.cgi",          # Без cgi-bin
+        f"http://{ip}/cgi-bin/snapshot.jpg",  # З розширенням
+        f"http://{ip}/snapshot.jpg",          # Простий snapshot
+        f"http://{ip}/image/jpeg.cgi",        # Axis камери
+        f"http://{ip}/jpg/image.jpg",         # Деякі IP камери
+        f"http://{ip}/videostream.cgi?rate=0&user={login}&pwd={password}",  # З параметрами в URL
+    ]
+    
+    results = []
+    
+    for url in test_urls:
+        try:
+            # Тестуємо різні методи аутентифікації
+            auth_methods = [
+                ("Basic Auth", requests.auth.HTTPBasicAuth(login, password)),
+                ("Digest Auth", requests.auth.HTTPDigestAuth(login, password)),
+                ("No Auth", None),
+            ]
+            
+            for auth_name, auth in auth_methods:
+                try:
+                    response = requests.get(url, auth=auth, timeout=5)
+                    status = response.status_code
+                    content_type = response.headers.get('content-type', '')
+                    
+                    result_info = f"{url} [{auth_name}] - Status: {status}"
+                    
+                    if status == 200:
+                        if 'image' in content_type.lower():
+                            return True, f"✅ Успіх! {result_info}\nТип контенту: {content_type}"
+                        else:
+                            result_info += f" (Не зображення: {content_type})"
+                    elif status == 401:
+                        result_info += " (Помилка аутентифікації)"
+                    elif status == 404:
+                        result_info += " (URL не знайдено)"
+                    elif status == 403:
+                        result_info += " (Доступ заборонено)"
+                    
+                    results.append(result_info)
+                    
+                except requests.exceptions.Timeout:
+                    results.append(f"{url} [{auth_name}] - Таймаут")
+                except requests.exceptions.ConnectionError:
+                    results.append(f"{url} [{auth_name}] - Помилка підключення")
+                except Exception as e:
+                    results.append(f"{url} [{auth_name}] - Помилка: {str(e)}")
+                    
+        except Exception as e:
+            results.append(f"{url} - Критична помилка: {str(e)}")
+    
+    return False, "Не вдалося підключитися до камери.\n\nРезультати тестування:\n" + "\n".join(results)
+
+def get_camera_snapshot_advanced(ip, login, password):
+    """Покращена функція отримання знімків з підтримкою різних методів"""
+    if not validate_ip_address(ip):
+        logging.error(f"[Snapshot] Некоректна IP-адреса: {ip}")
+        return None
+    
+    # Спробуємо різні URL та методи аутентифікації
+    urls_to_try = [
+        f"http://{ip}/cgi-bin/snapshot.cgi",
+        f"http://{ip}/snapshot.cgi",
+        f"http://{ip}/cgi-bin/snapshot.jpg",
+        f"http://{ip}/snapshot.jpg",
+        f"http://{ip}/image/jpeg.cgi",
+    ]
+    
+    auth_methods = [
+        ("Basic", requests.auth.HTTPBasicAuth(login, password)),
+        ("Digest", requests.auth.HTTPDigestAuth(login, password)),
+    ]
+    
+    for url in urls_to_try:
+        for auth_name, auth in auth_methods:
+            try:
+                logging.info(f"[Snapshot] Спроба: {url} з {auth_name} Auth")
+                response = requests.get(url, auth=auth, stream=True, timeout=10)
+                
+                if response.status_code == 200:
+                    content_type = response.headers.get('content-type', '')
+                    if 'image' in content_type.lower():
+                        # Створити папку temp, якщо не існує
+                        save_folder = Path(get_current_save_folder())
+                        temp_folder = save_folder / "temp"
+                        temp_folder.mkdir(parents=True, exist_ok=True)
+                        img_path = temp_folder / f"snap_{int(time.time())}.jpg"
+                        
+                        with open(img_path, "wb") as f:
+                            for chunk in response.iter_content(1024):
+                                f.write(chunk)
+                        
+                        logging.info(f"[Snapshot] Знімок отримано: {img_path} (метод: {auth_name}, URL: {url})")
+                        return str(img_path)
+                    else:
+                        logging.warning(f"[Snapshot] Отримано не зображення: {content_type}")
+                else:
+                    logging.warning(f"[Snapshot] HTTP {response.status_code} для {url} з {auth_name}")
+                    
+            except requests.exceptions.Timeout:
+                logging.warning(f"[Snapshot] Таймаут для {url} з {auth_name}")
+            except requests.exceptions.ConnectionError:
+                logging.warning(f"[Snapshot] Помилка підключення для {url} з {auth_name}")
+            except Exception as e:
+                logging.error(f"[Snapshot] Помилка {url} з {auth_name}: {e}")
+    
+    logging.error("[Snapshot] Всі спроби отримання знімка невдалі")
+    return None
+
+# ============================================================================
+# ФУНКЦІЇ РОБОТИ З TELEGRAM
+# ============================================================================
+
+def send_telegram_message(token, chat_id, message):
+    """Відправка текстового повідомлення в Telegram"""
+    if not token or not chat_id:
+        logging.warning("[Telegram] Токен або Chat ID не налаштовані")
+        return False
+    
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        response = requests.post(url, data={"chat_id": chat_id, "text": message}, timeout=10)
+        if response.status_code == 200:
+            logging.info(f"[Telegram] Відправлено повідомлення. Статус: {response.status_code}")
+            return True
+        else:
+            logging.error(f"[Telegram] Помилка відправки. Статус: {response.status_code}")
+            return False
+    except Exception as e:
+        logging.error(f"[Telegram Error] Помилка відправки повідомлення: {e}")
+        return False
+
+def send_telegram_photo(token, chat_id, photo_path, caption=""):
+    """Відправка фото в Telegram"""
+    if not token or not chat_id:
+        logging.warning("[Telegram] Токен або Chat ID не налаштовані")
+        return False
+    
+    if not os.path.exists(photo_path):
+        logging.error(f"[Telegram Photo] Файл не знайдено: {photo_path}")
+        return False
+    
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    try:
+        with open(photo_path, "rb") as f:
+            files = {"photo": f}
+            data = {"chat_id": chat_id, "caption": caption}
+            response = requests.post(url, files=files, data=data, timeout=30)
+            if response.status_code == 200:
+                logging.info(f"[Telegram Photo] Фото відправлено. Статус: {response.status_code}")
+                return True
+            else:
+                logging.error(f"[Telegram Photo] Помилка відправки фото. Статус: {response.status_code}")
+                return False
+    except Exception as e:
+        logging.error(f"[Telegram Photo Error] Помилка відправки фото: {e}")
+        return False
+
+# ============================================================================
+# ФУНКЦІЇ РОБОТИ З EXCEL
+# ============================================================================
+
+def log_to_excel(folder, barcode, timestamp):
+    """Запис даних в Excel файл"""
+    try:
+        # Створити папку, якщо не існує
+        folder_path = Path(folder)
+        folder_path.mkdir(parents=True, exist_ok=True)
+        filename = folder_path / "session_log.xlsx"
+        
+        if filename.exists():
+            wb = load_workbook(filename)
+            ws = wb.active
+        else:
+            wb = Workbook()
+            ws = wb.active
+            ws.append(["Час", "Штрихкод"])
+        
+        ws.append([timestamp, barcode])
+        wb.save(filename)
+        logging.info(f"[Excel] Запис до журналу: {barcode} о {timestamp}")
+        return True
+    except Exception as e:
+        logging.error(f"[Excel] Помилка при записі в Excel: {e}")
+        return False
+
+# ============================================================================
+# КЛАСИ
+# ============================================================================
+
+class BarcodeProcessor:
+    """Клас для обробки штрихкодів"""
+    
+    def __init__(self, config):
+        self.config = config
+        self.current_packer = None
+        self.session_folder = None
+        logging.info("Ініціалізовано BarcodeProcessor.")
+
+    def process_code(self, code):
+        """Основна функція обробки коду"""
+        code = code.strip()
+        if not code:
+            logging.warning("Отримано порожній код")
+            return "Порожній код"
+        
+        now_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        logging.info(f"Отримано код: {code}")
+
+        # Перевірка на ID пакувальника (3 цифри)
+        if len(code) == 3 and code.isdigit():
+            packer = next((p for p in self.config["packers"] if p["id"] == code), None)
+            if packer:
+                self.current_packer = packer
+                # Створити папку sessions
+                save_folder = Path(self.config.get("save_folder", str(DEFAULT_SAVE_FOLDER)))
+                sessions_folder = save_folder / "sessions"
+                sessions_folder.mkdir(parents=True, exist_ok=True)
+                self.session_folder = sessions_folder / f"{now_str}_{packer['name']}_{packer['id']}"
+                try:
+                    self.session_folder.mkdir(exist_ok=True)
+                    logging.info(f"Обрано пакувальника: {packer['name']} (ID {packer['id']}). Створена сесійна папка {self.session_folder}")
+                    send_telegram_message(self.config["telegram_token"], self.config["telegram_chat_id"],
+                                          f"🧑‍🏭 Пакувальник {packer['name']} (#{packer['id']}) почав роботу.")
+                    return f"Обрано пакувальника: {packer['name']}"
+                except Exception as e:
+                    logging.error(f"Помилка створення папки сесії: {e}")
+                    return "Помилка створення папки сесії"
+            else:
+                logging.warning(f"Пакувальник з ID {code} не знайдений.")
+                return f"Пакувальник з ID {code} не знайдений"
+
+        # Обробка штрихкода товару
+        if self.current_packer:
+            return self.process_product_barcode(code)
+        else:
+            logging.warning("Спочатку проскануйте ID пакувальника!")
+            return "Спочатку проскануйте ID пакувальника!"
+
+    def process_product_barcode(self, code):
+        """Обробка штрихкода товару"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Вибираємо джерело зображення: реєстратор або окрема камера
+        snapshot_path = None
+        
+        if self.config.get("use_recorder", True) and self.config.get("recorder_ip"):
+            # Отримуємо скриншот з реєстратора через RTSP
+            logging.info("[Snapshot] Використовуємо реєстратор для скриншотів")
+            snapshot_path = get_rtsp_screenshot(
+                self.config["recorder_ip"],
+                self.config.get("recorder_port", "554"),
+                self.config["recorder_login"],
+                self.config["recorder_password"],
+                self.config.get("recorder_rtsp_template", "hikvision"),
+                self.config.get("recorder_channel", "1")
+            )
+        elif self.config.get("camera_ip"):
+            # Отримуємо скриншот з окремої камери
+            logging.info("[Snapshot] Використовуємо окрему камеру для скриншотів")
+            snapshot_path = get_camera_snapshot_advanced(
+                self.config["camera_ip"],
+                self.config["camera_login"],
+                self.config["camera_password"]
+            )
+        
+        if snapshot_path:
+            filename = f"{code}_{timestamp.replace(':', '-').replace(' ', '_')}.jpg"
+            final_path = self.session_folder / filename
+            
+            try:
+                if not OPENCV_AVAILABLE:
+                    # Якщо OpenCV недоступний, просто копіюємо файл
+                    import shutil
+                    shutil.copy2(snapshot_path, final_path)
+                else:
+                    img = cv2.imread(snapshot_path)
+                    if img is not None:
+                        # Додати текст на зображення
+                        cv2.putText(img, f"{code} {timestamp}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                                    1, (0, 0, 255), 2, cv2.LINE_AA)
+                        
+                        # Додати інформацію про джерело
+                        source_info = "Реєстратор" if self.config.get("use_recorder", True) else "Камера"
+                        cv2.putText(img, f"Джерело: {source_info}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.7, (0, 255, 0), 2, cv2.LINE_AA)
+                        
+                        cv2.imwrite(str(final_path), img)
+                    else:
+                        # Fallback - копіюємо оригінальний файл
+                        import shutil
+                        shutil.copy2(snapshot_path, final_path)
+                
+                # Видалити тимчасовий файл
+                try:
+                    Path(snapshot_path).unlink()
+                except:
+                    pass
+                
+                logging.info(f"Збережено зображення з підписом: {final_path}")
+
+                # Відправити фото в Telegram
+                source_info = "Реєстратор" if self.config.get("use_recorder", True) else "Камера"
+                caption = f"📦 Штрихкод: {code}\n🕒 {timestamp}\n👤 {self.current_packer['name']}\n📹 Джерело: {source_info}"
+                send_telegram_photo(self.config["telegram_token"], self.config["telegram_chat_id"],
+                                    str(final_path), caption)
+
+                # Записати в Excel
+                log_to_excel(str(self.session_folder), code, timestamp)
+                
+                return f"Оброблено штрихкод: {code} ({source_info})"
+            except Exception as e:
+                logging.error(f"Помилка при обробці зображення: {e}")
+                return f"Помилка обробки: {str(e)}"
+        else:
+            logging.error("Не отримано скриншот.")
+            return "Помилка отримання скриншота з камери/реєстратора"
+
+
+class BarcodeDisplayWindow:
+    """Окреме вікно для відображення штрихкода"""
+    
+    def __init__(self, parent, packer_name, packer_id):
+        self.window = tk.Toplevel(parent)
+        self.window.title(f"Штрихкод для {packer_name}")
+        self.window.geometry("400x300")
+        self.window.resizable(False, False)
+        
+        # Центрування вікна
+        self.window.transient(parent)
+        self.window.grab_set()
+        
+        # Заголовок
+        title_label = tk.Label(self.window, text=f"Штрихкод для пакувальника", 
+                              font=("Arial", 14, "bold"))
+        title_label.pack(pady=10)
+        
+        info_label = tk.Label(self.window, text=f"{packer_name} (ID: {packer_id})", 
+                             font=("Arial", 12), fg="#2E7D32")
+        info_label.pack(pady=5)
+        
+        # Генеруємо штрихкод
+        barcode_img = generate_barcode_image(packer_id)
+        
+        if barcode_img:
+            # Змінюємо розмір для відображення
+            barcode_img = barcode_img.resize((300, 100), Image.Resampling.LANCZOS)
+            self.photo = ImageTk.PhotoImage(barcode_img)
+            
+            # Відображаємо штрихкод
+            barcode_label = tk.Label(self.window, image=self.photo, bg="white", 
+                                   relief="solid", bd=2)
+            barcode_label.pack(pady=20)
+            
+            # Текст з кодом
+            code_label = tk.Label(self.window, text=packer_id, 
+                                 font=("Courier", 16, "bold"))
+            code_label.pack(pady=5)
+            
+            # Інструкція
+            instruction_label = tk.Label(self.window, 
+                                       text="Проскануйте цей код для входу в систему", 
+                                       font=("Arial", 10), fg="#666666")
+            instruction_label.pack(pady=5)
+        else:
+            error_label = tk.Label(self.window, text="Помилка генерації штрихкода", 
+                                 font=("Arial", 12), fg="red")
+            error_label.pack(pady=20)
+        
+        # Кнопка закриття
+        close_btn = tk.Button(self.window, text="Закрити", command=self.window.destroy,
+                             bg="#f44336", fg="white", font=("Arial", 12, "bold"))
+        close_btn.pack(pady=20)
+        
+        # ESC для закриття
+        self.window.bind('<Escape>', lambda e: self.window.destroy())
+        self.window.focus_set()
+
+
+class App:
+    """Головний клас додатку"""
+    
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Інструмент пакувальника v3.0 - RTSP скриншоти")
+        self.root.geometry("800x750")
+        self.config = load_config()
+        self.processor = BarcodeProcessor(self.config)
+        
+        # Статус індикатор
+        self.status_var = tk.StringVar()
+        self.status_var.set("Готово")
+
+        # Створюємо папку для збереження
+        ensure_save_folder(self.config.get("save_folder", str(DEFAULT_SAVE_FOLDER)))
+
+        self.create_widgets()
+        self.root.bind("<Return>", self.scan_input_entered)
+        
+        # Очистити старі тимчасові файли при запуску
+        cleanup_temp_files()
+        
+        logging.info("Запущено GUI додаток.")
+
+    def create_widgets(self):
+        """Створення головного інтерфейсу"""
+        # Створюємо Notebook для вкладок
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Вкладка 1: Основні налаштування
+        main_frame = ttk.Frame(notebook)
+        notebook.add(main_frame, text="📱 Основні налаштування")
+        
+        # Вкладка 2: RTSP реєстратор
+        recorder_frame = ttk.Frame(notebook)
+        notebook.add(recorder_frame, text="🎥 RTSP реєстратор")
+        
+        # Вкладка 3: Сканування
+        scan_frame = ttk.Frame(notebook)
+        notebook.add(scan_frame, text="📊 Сканування")
+        
+        # Вкладка 4: Telegram повідомлення
+        telegram_frame = ttk.Frame(notebook)
+        notebook.add(telegram_frame, text="📨 Telegram")
+        
+        self.create_main_settings(main_frame)
+        self.create_recorder_settings(recorder_frame)
+        self.create_scan_interface(scan_frame)
+        self.create_telegram_interface(telegram_frame)
+
+    def browse_save_folder(self):
+        """Вибір папки для збереження"""
+        folder = filedialog.askdirectory(
+            title="Оберіть папку для збереження файлів",
+            initialdir=self.save_path_var.get()
+        )
+        
+        if folder:
+            # Додаємо підпапку SkanerFoto
+            save_path = Path(folder) / "SkanerFoto"
+            self.save_path_var.set(str(save_path))
+            self.status_var.set(f"Обрано папку: {save_path}")
+
+    def reset_default_path(self):
+        """Скидання шляху на значення за замовчуванням"""
+        self.save_path_var.set(str(DEFAULT_SAVE_FOLDER))
+        self.status_var.set("Встановлено папку за замовчуванням")
+
+    def create_main_settings(self, parent):
+        """Створення інтерфейсу основних налаштувань"""
+        # Основна рамка з прокруткою
+        canvas = tk.Canvas(parent)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        main_frame = scrollable_frame
+        
+        # Шлях збереження
+        tk.Label(main_frame, text="📁 Налаштування збереження файлів", font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=3, pady=(0,10), sticky="w")
+        
+        tk.Label(main_frame, text="Папка:").grid(row=1, column=0, sticky="e", padx=(0,5))
+        
+        # Фрейм для шляху та кнопки
+        path_frame = tk.Frame(main_frame)
+        path_frame.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(0,15))
+        
+        self.save_path_var = tk.StringVar()
+        self.save_path_var.set(self.config.get("save_folder", str(DEFAULT_SAVE_FOLDER)))
+        
+        self.save_path_label = tk.Label(path_frame, textvariable=self.save_path_var, 
+                                       bg="#E8F5E8", relief="sunken", anchor="w")
+        self.save_path_label.pack(side="left", fill="x", expand=True)
+        
+        self.browse_btn = tk.Button(path_frame, text="📂 Обрати", command=self.browse_save_folder)
+        self.browse_btn.pack(side="right", padx=(5,0))
+        
+        path_frame.columnconfigure(0, weight=1)
+
+        # Налаштування джерела зображення
+        tk.Label(main_frame, text="📸 Джерело зображень", font=("Arial", 12, "bold")).grid(row=2, column=0, columnspan=3, pady=(20,10), sticky="w")
+        
+        self.use_recorder_var = tk.BooleanVar()
+        self.use_recorder_var.set(self.config.get("use_recorder", True))
+        
+        use_recorder_cb = tk.Checkbutton(main_frame, text="Використовувати реєстратор для скриншотів", 
+                                        variable=self.use_recorder_var, font=("Arial", 11))
+        use_recorder_cb.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0,10))
+
+        # Налаштування окремої камери (якщо не використовуємо реєстратор)
+        tk.Label(main_frame, text="📷 Налаштування окремої камери", font=("Arial", 12, "bold")).grid(row=4, column=0, columnspan=3, pady=(20,10), sticky="w")
+        
+        tk.Label(main_frame, text="IP Камери:").grid(row=5, column=0, sticky="e", padx=(0,5))
+        self.ip_entry = tk.Entry(main_frame, width=40)
+        self.ip_entry.insert(0, self.config["camera_ip"])
+        self.ip_entry.grid(row=5, column=1, sticky="ew")
+        
+        self.test_btn = tk.Button(main_frame, text="🔍 Тест", command=self.test_camera_advanced)
+        self.test_btn.grid(row=5, column=2, padx=(5,0))
+
+        tk.Label(main_frame, text="Логін:").grid(row=6, column=0, sticky="e", padx=(0,5))
+        self.login_entry = tk.Entry(main_frame, width=40)
+        self.login_entry.insert(0, self.config["camera_login"])
+        self.login_entry.grid(row=6, column=1, columnspan=2, sticky="ew")
+
+        tk.Label(main_frame, text="Пароль:").grid(row=7, column=0, sticky="e", padx=(0,5))
+        self.pass_entry = tk.Entry(main_frame, width=40, show="*")
+        self.pass_entry.insert(0, self.config["camera_password"])
+        self.pass_entry.grid(row=7, column=1, columnspan=2, sticky="ew")
+
+        # Пакувальники
+        tk.Label(main_frame, text="👷 Пакувальники", font=("Arial", 12, "bold")).grid(row=8, column=0, columnspan=3, pady=(20,10), sticky="w")
+        
+        # Фрейм для списку пакувальників з кнопками
+        packers_frame = tk.Frame(main_frame)
+        packers_frame.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(0,10))
+        
+        # Список пакувальників
+        self.packers_listbox = tk.Listbox(packers_frame, height=8, width=50)
+        self.packers_listbox.grid(row=0, column=0, sticky="ew")
+        
+        # Фрейм для кнопок пакувальників
+        packer_buttons_frame = tk.Frame(packers_frame)
+        packer_buttons_frame.grid(row=0, column=1, padx=(10,0), sticky="n")
+        
+        self.add_btn = tk.Button(packer_buttons_frame, text="➕ Додати", command=self.add_packer)
+        self.add_btn.pack(fill=tk.X, pady=(0,5))
+        
+        self.del_btn = tk.Button(packer_buttons_frame, text="🗑 Видалити", command=self.del_packer)
+        self.del_btn.pack(fill=tk.X, pady=(0,5))
+        
+        self.show_barcode_btn = tk.Button(packer_buttons_frame, text="📊 Показати код", 
+                                         command=self.show_barcode_for_selected, 
+                                         bg="#FF9800", fg="white")
+        self.show_barcode_btn.pack(fill=tk.X, pady=(0,5))
+        
+        # Інформація про штрихкоди
+        info_text = tk.Text(packer_buttons_frame, height=4, width=20, font=("Arial", 8), 
+                           bg="#FFF3E0", fg="#E65100")
+        info_text.pack(fill=tk.X, pady=(10,0))
+        info_text.insert(tk.END, "💡 Порада:\n\nОберіть пакувальника та натисніть 'Показати код' щоб відобразити штрихкод для сканування")
+        info_text.configure(state='disabled')
+        
+        packers_frame.columnconfigure(0, weight=1)
+        
+        self.refresh_packers()
+
+        # Кнопка збереження
+        self.save_btn = tk.Button(main_frame, text="💾 Зберегти налаштування", command=self.save_all, bg="#4CAF50", fg="white", font=("Arial", 10, "bold"))
+        self.save_btn.grid(row=10, column=0, columnspan=3, pady=20, sticky="ew")
+
+        # Налаштування розтягування стовпців
+        main_frame.columnconfigure(1, weight=1)
+
+    def create_recorder_settings(self, parent):
+        """Створення інтерфейсу налаштувань RTSP реєстратора"""
+        # Рамка для налаштувань RTSP реєстратора
+        main_frame = tk.Frame(parent, padx=10, pady=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Заголовок
+        tk.Label(main_frame, text="🎥 Налаштування RTSP реєстратора", font=("Arial", 14, "bold")).grid(row=0, column=0, columnspan=3, pady=(0,20), sticky="w")
+        
+        # Перевірка доступності OpenCV
+        if not RTSP_AVAILABLE:
+            warning_frame = tk.Frame(main_frame, bg="#FFEBEE", relief="solid", bd=1)
+            warning_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0,20))
+            
+            warning_label = tk.Label(warning_frame, 
+                                   text="⚠️ OpenCV не встановлено!\n\nВстановіть командою:\npip install opencv-python",
+                                   bg="#FFEBEE", fg="#C62828", font=("Arial", 10, "bold"))
+            warning_label.pack(pady=15)
+        
+        # IP адреса реєстратора
+        tk.Label(main_frame, text="IP Реєстратора:").grid(row=2, column=0, sticky="e", padx=(0,5))
+        self.recorder_ip_entry = tk.Entry(main_frame, width=40)
+        self.recorder_ip_entry.insert(0, self.config.get("recorder_ip", ""))
+        self.recorder_ip_entry.grid(row=2, column=1, sticky="ew")
+        
+        self.test_rtsp_btn = tk.Button(main_frame, text="🔍 Тест RTSP", command=self.test_rtsp_connection)
+        self.test_rtsp_btn.grid(row=2, column=2, padx=(5,0))
+
+        # Порт RTSP
+        tk.Label(main_frame, text="Порт:").grid(row=3, column=0, sticky="e", padx=(0,5))
+        self.recorder_port_entry = tk.Entry(main_frame, width=10)
+        self.recorder_port_entry.insert(0, self.config.get("recorder_port", "554"))
+        self.recorder_port_entry.grid(row=3, column=1, sticky="w")
+        
+        tk.Label(main_frame, text="(зазвичай 554 для RTSP)").grid(row=3, column=2, sticky="w", padx=(10,0))
+
+        # Логін для реєстратора
+        tk.Label(main_frame, text="Логін:").grid(row=4, column=0, sticky="e", padx=(0,5))
+        self.recorder_login_entry = tk.Entry(main_frame, width=40)
+        self.recorder_login_entry.insert(0, self.config.get("recorder_login", ""))
+        self.recorder_login_entry.grid(row=4, column=1, columnspan=2, sticky="ew")
+
+        # Пароль для реєстратора
+        tk.Label(main_frame, text="Пароль:").grid(row=5, column=0, sticky="e", padx=(0,5))
+        self.recorder_pass_entry = tk.Entry(main_frame, width=40, show="*")
+        self.recorder_pass_entry.insert(0, self.config.get("recorder_password", ""))
+        self.recorder_pass_entry.grid(row=5, column=1, columnspan=2, sticky="ew")
+
+        # Шаблон виробника
+        tk.Label(main_frame, text="Виробник:").grid(row=6, column=0, sticky="e", padx=(0,5))
+        
+        self.template_var = tk.StringVar()
+        self.template_var.set(self.config.get("recorder_rtsp_template", "hikvision"))
+        
+        template_frame = tk.Frame(main_frame)
+        template_frame.grid(row=6, column=1, columnspan=2, sticky="ew")
+        
+        templates = get_rtsp_templates()
+        for i, (key, data) in enumerate(templates.items()):
+            rb = tk.Radiobutton(template_frame, text=data["name"], variable=self.template_var, 
+                               value=key, font=("Arial", 9))
+            rb.grid(row=i//3, column=i%3, sticky="w", padx=(0,10))
+        
+        # Канал
+        tk.Label(main_frame, text="Канал:").grid(row=7, column=0, sticky="e", padx=(0,5))
+        self.recorder_channel_entry = tk.Entry(main_frame, width=10)
+        self.recorder_channel_entry.insert(0, self.config.get("recorder_channel", "1"))
+        self.recorder_channel_entry.grid(row=7, column=1, sticky="w")
+        
+        tk.Label(main_frame, text="(номер каналу: 1, 2, 3...)").grid(row=7, column=2, sticky="w", padx=(10,0))
+
+        # Приклади RTSP URL
+        example_frame = tk.LabelFrame(main_frame, text="📋 Приклади RTSP URL", font=("Arial", 10, "bold"))
+        example_frame.grid(row=8, column=0, columnspan=3, pady=(20,0), sticky="ew")
+        
+        examples_text = tk.Text(example_frame, height=8, width=70, wrap=tk.WORD, 
+                               bg="#F8F9FA", fg="#333333", font=("Courier", 9))
+        examples_text.pack(padx=10, pady=10, fill="both")
+        
+        examples_content = """Hikvision:
+rtsp://admin:password@192.168.1.100:554/Streaming/Channels/101
+
+Dahua:
+rtsp://admin:password@192.168.1.100:554/cam/realmonitor?channel=1&subtype=0
+
+Axis:
+rtsp://admin:password@192.168.1.100:554/axis-media/media.amp
+
+Foscam:
+rtsp://admin:password@192.168.1.100:554/videoMain
+
+Загальний:
+rtsp://admin:password@192.168.1.100:554/live/ch1"""
+        
+        examples_text.insert(tk.END, examples_content)
+        examples_text.configure(state='disabled')
+
+        # Інформаційний текст
+        info_text = tk.Text(main_frame, height=6, width=70, wrap=tk.WORD, bg="#E8F5E8", fg="#2E7D32")
+        info_text.grid(row=9, column=0, columnspan=3, pady=(10,0), sticky="ew")
+        
+        info_content = """💡 Переваги RTSP для скриншотів:
+
+✅ Універсальність - працює з усіма IP камерами та реєстраторами
+✅ Швидкість - миттєві скриншоти без затримок  
+✅ Якість - висока роздільна здатність зображень
+✅ Надійність - стабільне підключення до реєстратора
+✅ Економія ресурсів - тільки скриншоти, без запису відео
+
+🔧 Порада: Для кращої якості використовуйте основний потік (main stream)."""
+        
+        info_text.insert(tk.END, info_content)
+        info_text.configure(state='disabled')
+
+        # Кнопка збереження налаштувань реєстратора
+        self.save_recorder_btn = tk.Button(main_frame, text="💾 Зберегти налаштування RTSP", command=self.save_recorder_settings, bg="#2196F3", fg="white", font=("Arial", 10, "bold"))
+        self.save_recorder_btn.grid(row=10, column=0, columnspan=3, pady=20, sticky="ew")
+
+        # Налаштування розтягування стовпців
+        main_frame.columnconfigure(1, weight=1)
+
+    def create_scan_interface(self, parent):
+        """Створення інтерфейсу сканування"""
+        # Рамка для сканування
+        main_frame = tk.Frame(parent, padx=10, pady=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Заголовок
+        tk.Label(main_frame, text="📱 Сканування штрихкодів", font=("Arial", 14, "bold")).grid(row=0, column=0, columnspan=3, pady=(0,20), sticky="w")
+        
+        # Поле для сканування з великим підписом
+        tk.Label(main_frame, text="🔍 Введіть код зі сканера:", font=("Arial", 12, "bold"), bg="#E3F2FD", fg="#1976D2").grid(row=1, column=0, columnspan=3, pady=(0,10), sticky="ew", ipady=10)
+        
+        # Велике поле для введення коду
+        self.scan_entry = tk.Entry(main_frame, font=("Courier", 20), bg="#FFF3E0", fg="#E65100", bd=3, relief="solid")
+        self.scan_entry.grid(row=2, column=0, columnspan=3, pady=10, sticky="ew", ipady=15)
+        self.scan_entry.focus()
+
+        # Інструкції
+        instructions = tk.Label(main_frame, text="📋 Інструкції:\n\n1️⃣ Спочатку проскануйте ID пакувальника (будь-який збережений)\n2️⃣ Потім скануйте штрихкоди товарів\n3️⃣ Натисніть Enter після кожного сканування\n\n📸 Скриншоти автоматично робляться з реєстратора", 
+                               font=("Arial", 11), justify="left", bg="#F1F8E9", fg="#33691E", padx=20, pady=15)
+        instructions.grid(row=3, column=0, columnspan=3, pady=(20,10), sticky="ew")
+
+        # Статус бар
+        status_frame = tk.Frame(main_frame, relief=tk.SUNKEN, bd=2, bg="#ECEFF1")
+        status_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(20,10))
+        
+        self.status_label = tk.Label(status_frame, textvariable=self.status_var, anchor="w", font=("Arial", 12), bg="#ECEFF1", fg="#37474F")
+        self.status_label.pack(fill=tk.X, padx=10, pady=8)
+
+        # Кнопка очищення файлів
+        cleanup_frame = tk.Frame(main_frame)
+        cleanup_frame.grid(row=5, column=0, columnspan=3, pady=(30,0), sticky="ew")
+        
+        tk.Label(cleanup_frame, text="🧹 Очищення старих файлів", font=("Arial", 12, "bold")).pack(pady=(0,10))
+        
+        self.cleanup_btn = tk.Button(cleanup_frame, text="🗑️ Видалити файли старше 2 тижнів", 
+                                   command=self.cleanup_old_files_dialog, 
+                                   bg="#FF5722", fg="white", font=("Arial", 11, "bold"))
+        self.cleanup_btn.pack(pady=5)
+        
+        tk.Label(cleanup_frame, text="⚠️ Увага: Ця дія видалить всі файли та папки сесій,\nстворені більше ніж 2 тижні тому", 
+                font=("Arial", 9), fg="#666666").pack(pady=(5,0))
+
+        # Налаштування розтягування стовпців
+        main_frame.columnconfigure(0, weight=1)
+
+    def create_telegram_interface(self, parent):
+        """Створення інтерфейсу Telegram повідомлень"""
+        # Рамка для Telegram повідомлень
+        main_frame = tk.Frame(parent, padx=10, pady=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Заголовок
+        tk.Label(main_frame, text="📨 Налаштування та повідомлення Telegram", font=("Arial", 14, "bold")).grid(row=0, column=0, columnspan=3, pady=(0,20), sticky="w")
+        
+        # Налаштування Telegram
+        tk.Label(main_frame, text="🤖 Налаштування бота", font=("Arial", 12, "bold")).grid(row=1, column=0, columnspan=3, pady=(0,10), sticky="w")
+        
+        tk.Label(main_frame, text="Token:").grid(row=2, column=0, sticky="e", padx=(0,5))
+        self.token_entry = tk.Entry(main_frame, width=40, show="*")
+        self.token_entry.insert(0, self.config["telegram_token"])
+        self.token_entry.grid(row=2, column=1, columnspan=2, sticky="ew")
+
+        tk.Label(main_frame, text="Chat ID:").grid(row=3, column=0, sticky="e", padx=(0,5))
+        self.chat_entry = tk.Entry(main_frame, width=40)
+        self.chat_entry.insert(0, self.config["telegram_chat_id"])
+        self.chat_entry.grid(row=3, column=1, columnspan=2, sticky="ew")
+        
+        # Кнопка збереження налаштувань Telegram
+        self.save_telegram_btn = tk.Button(main_frame, text="💾 Зберегти налаштування Telegram", 
+                                         command=self.save_telegram_settings, 
+                                         bg="#2196F3", fg="white", font=("Arial", 10, "bold"))
+        self.save_telegram_btn.grid(row=4, column=0, columnspan=3, pady=(10,20), sticky="ew")
+        
+        # Відправка повідомлень
+        tk.Label(main_frame, text="💬 Відправка повідомлень", font=("Arial", 12, "bold")).grid(row=5, column=0, columnspan=3, pady=(20,10), sticky="w")
+        
+        # Текстове поле для повідомлення
+        self.message_text = tk.Text(main_frame, height=6, width=60, font=("Arial", 11), bg="#F8F9FA", bd=2, relief="solid")
+        self.message_text.grid(row=6, column=0, columnspan=3, pady=(0,10), sticky="ew")
+        
+        # Швидкі шаблони
+        tk.Label(main_frame, text="🚀 Швидкі шаблони:", font=("Arial", 11, "bold")).grid(row=7, column=0, columnspan=3, pady=(20,10), sticky="w")
+        
+        templates_frame = tk.Frame(main_frame)
+        templates_frame.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(0,10))
+        
+        # Кнопки шаблонів
+        templates = [
+            ("🕐 Перерва", "⏰ Перерва на обід\n🍽️ Повертаємося через 30 хвилин"),
+            ("✅ Кінець зміни", "🎯 Зміна завершена\n📊 Всі завдання виконано"),
+            ("🚨 Проблема", "❗ Виникла проблема\n🔧 Потрібна допомога"),
+            ("📦 Товар відсутній", "❌ Товар відсутній на складі\n📋 Очікуємо поповнення")
+        ]
+        
+        for i, (name, template) in enumerate(templates):
+            btn = tk.Button(templates_frame, text=name, 
+                          command=lambda t=template: self.insert_template(t),
+                          bg="#E3F2FD", fg="#1976D2", font=("Arial", 9))
+            btn.grid(row=i//2, column=i%2, padx=5, pady=2, sticky="ew")
+        
+        templates_frame.columnconfigure(0, weight=1)
+        templates_frame.columnconfigure(1, weight=1)
+        
+        # Кнопка відправки
+        self.send_message_btn = tk.Button(main_frame, text="📤 Відправити повідомлення", 
+                                        command=self.send_custom_message, 
+                                        bg="#4CAF50", fg="white", font=("Arial", 12, "bold"))
+        self.send_message_btn.grid(row=9, column=0, columnspan=3, pady=20, sticky="ew")
+        
+        # Історія повідомлень
+        tk.Label(main_frame, text="📋 Історія відправлених повідомлень:", font=("Arial", 11, "bold")).grid(row=10, column=0, columnspan=3, pady=(20,10), sticky="w")
+        
+        self.history_text = tk.Text(main_frame, height=8, width=60, font=("Arial", 9), bg="#FAFAFA", state='disabled', bd=1, relief="solid")
+        self.history_text.grid(row=11, column=0, columnspan=3, sticky="ew")
+        
+        # Кнопка очищення історії
+        self.clear_history_btn = tk.Button(main_frame, text="🗑️ Очистити історію", 
+                                         command=self.clear_message_history, 
+                                         bg="#FF5722", fg="white", font=("Arial", 10))
+        self.clear_history_btn.grid(row=12, column=0, columnspan=3, pady=10, sticky="ew")
+
+        # Налаштування розтягування стовпців
+        main_frame.columnconfigure(0, weight=1)
+
+    # ========================================================================
+    # МЕТОДИ РОБОТИ З TELEGRAM
+    # ========================================================================
+
+    def insert_template(self, template):
+        """Вставка шаблону в поле повідомлення"""
+        self.message_text.delete(1.0, tk.END)
+        self.message_text.insert(tk.END, template)
+
+    def send_custom_message(self):
+        """Відправка користувацького повідомлення"""
+        message = self.message_text.get(1.0, tk.END).strip()
+        
+        if not message:
+            messagebox.showwarning("Увага", "Введіть повідомлення для відправки!")
+            return
+        
+        if not self.config.get("telegram_token") or not self.config.get("telegram_chat_id"):
+            messagebox.showerror("Помилка", "Налаштуйте токен та Chat ID в основних налаштуваннях!")
+            return
+        
+        self.status_var.set("Відправляємо повідомлення...")
+        self.root.update()
+        
+        def send_in_thread():
+            try:
+                success = send_telegram_message(self.config["telegram_token"], 
+                                              self.config["telegram_chat_id"], 
+                                              message)
+                
+                if success:
+                    # Додаємо до історії
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    history_entry = f"[{timestamp}] ✅ {message[:50]}{'...' if len(message) > 50 else ''}\n"
+                    
+                    self.root.after(0, lambda: self.add_to_history(history_entry))
+                    self.root.after(0, lambda: self.message_text.delete(1.0, tk.END))
+                    self.root.after(0, lambda: self.status_var.set("Повідомлення відправлено"))
+                    self.root.after(0, lambda: messagebox.showinfo("✅ Успіх", "Повідомлення відправлено!"))
+                else:
+                    self.root.after(0, lambda: self.status_var.set("Помилка відправки"))
+                    self.root.after(0, lambda: messagebox.showerror("❌ Помилка", "Не вдалося відправити повідомлення"))
+                    
+            except Exception as e:
+                self.root.after(0, lambda: self.status_var.set("Помилка відправки"))
+                self.root.after(0, lambda: messagebox.showerror("❌ Помилка", f"Помилка відправки: {str(e)}"))
+        
+        # Запускаємо відправку в окремому потоці
+        thread = threading.Thread(target=send_in_thread)
+        thread.daemon = True
+        thread.start()
+
+    def add_to_history(self, entry):
+        """Додавання запису до історії"""
+        self.history_text.configure(state='normal')
+        self.history_text.insert(tk.END, entry)
+        self.history_text.see(tk.END)
+        self.history_text.configure(state='disabled')
+
+    def clear_message_history(self):
+        """Очищення історії повідомлень"""
+        result = messagebox.askyesno("Підтвердження", "Очистити історію повідомлень?")
+        if result:
+            self.history_text.configure(state='normal')
+            self.history_text.delete(1.0, tk.END)
+            self.history_text.configure(state='disabled')
+
+    # ========================================================================
+    # МЕТОДИ РОБОТИ З ПАКУВАЛЬНИКАМИ
+    # ========================================================================
+
+    def refresh_packers(self):
+        """Оновлення списку пакувальників"""
+        self.packers_listbox.delete(0, tk.END)
+        for p in self.config["packers"]:
+            self.packers_listbox.insert(tk.END, f"{p['id']}: {p['name']}")
+        logging.info("Оновлено список пакувальників.")
+
+    def add_packer(self):
+        """Додавання нового пакувальника"""
+        pid = simpledialog.askstring("ID пакувальника", "Введіть 3-значний ID пакувальника:")
+        if not pid:
+            return
+        
+        if not (len(pid) == 3 and pid.isdigit()):
+            messagebox.showerror("Помилка", "ID має бути 3-значним числом!")
+            return
+        
+        # Перевірити унікальність ID
+        if any(p["id"] == pid for p in self.config["packers"]):
+            messagebox.showerror("Помилка", "Пакувальник з таким ID вже існує!")
+            return
+        
+        name = simpledialog.askstring("Ім'я пакувальника", "Введіть ім'я пакувальника:")
+        if name:
+            self.config["packers"].append({"id": pid, "name": name.strip()})
+            self.refresh_packers()
+            logging.info(f"Додано пакувальника: {name} (ID {pid}).")
+            self.status_var.set(f"Додано пакувальника: {name}")
+
+    def del_packer(self):
+        """Видалення пакувальника"""
+        idx = self.packers_listbox.curselection()
+        if not idx:
+            messagebox.showwarning("Увага", "Оберіть пакувальника для видалення!")
+            return
+        
+        packer = self.config["packers"][idx[0]]
+        result = messagebox.askyesno("Підтвердження", f"Видалити пакувальника {packer['name']} (ID {packer['id']})?")
+        
+        if result:
+            removed = self.config["packers"].pop(idx[0])
+            self.refresh_packers()
+            logging.info(f"Видалено пакувальника: {removed['name']} (ID {removed['id']}).")
+            self.status_var.set(f"Видалено пакувальника: {removed['name']}")
+
+    def show_barcode_for_selected(self):
+        """Показ штрихкода для обраного пакувальника"""
+        if not BARCODE_AVAILABLE:
+            messagebox.showerror("Помилка", "Модуль barcode не встановлено!\n\nВстановіть: pip install python-barcode[images]")
+            return
+            
+        idx = self.packers_listbox.curselection()
+        if not idx:
+            messagebox.showwarning("Увага", "Оберіть пакувальника для показу штрихкода!")
+            return
+        
+        packer = self.config["packers"][idx[0]]
+        
+        # Відкриваємо вікно з штрихкодом
+        BarcodeDisplayWindow(self.root, packer['name'], packer['id'])
+
+    # ========================================================================
+    # МЕТОДИ ТЕСТУВАННЯ
+    # ========================================================================
+
+    def test_camera_advanced(self):
+        """Розширене тестування камери"""
+        ip = self.ip_entry.get().strip()
+        login = self.login_entry.get().strip()
+        password = self.pass_entry.get()
+        
+        if not ip:
+            messagebox.showerror("Помилка", "Введіть IP-адресу камери!")
+            return
+        
+        self.status_var.set("Тестування камери...")
+        self.root.update()
+        
+        success, message = test_camera_connection_advanced(ip, login, password)
+        
+        if success:
+            messagebox.showinfo("✅ Камера працює", message)
+            self.status_var.set("Камера працює")
+        else:
+            messagebox.showerror("❌ Проблеми з камерою", message)
+            self.status_var.set("Проблеми з камерою")
+
+    def test_rtsp_connection(self):
+        """Тестування RTSP підключення"""
+        if not RTSP_AVAILABLE:
+            messagebox.showerror("Помилка", "OpenCV не встановлено!\n\nВстановіть: pip install opencv-python")
+            return
+            
+        ip = self.recorder_ip_entry.get().strip()
+        port = self.recorder_port_entry.get().strip()
+        login = self.recorder_login_entry.get().strip()
+        password = self.recorder_pass_entry.get()
+        template = self.template_var.get()
+        channel = self.recorder_channel_entry.get().strip()
+        
+        if not ip:
+            messagebox.showerror("Помилка", "Введіть IP-адресу реєстратора!")
+            return
+        
+        if not validate_ip_address(ip):
+            messagebox.showerror("Помилка", "Некоректна IP-адреса!")
+            return
+            
+        if not port or not port.isdigit():
+            messagebox.showerror("Помилка", "Введіть коректний порт!")
+            return
+        
+        if not channel or not channel.isdigit():
+            messagebox.showerror("Помилка", "Введіть номер каналу!")
+            return
+        
+        self.status_var.set("Тестування RTSP...")
+        self.root.update()
+        
+        def test_in_thread():
+            try:
+                success, message = test_rtsp_connection(ip, port, login, password, template, channel)
+                
+                if success:
+                    self.root.after(0, lambda: messagebox.showinfo("✅ RTSP працює", message))
+                    self.root.after(0, lambda: self.status_var.set("RTSP реєстратор працює"))
+                else:
+                    self.root.after(0, lambda: messagebox.showerror("❌ Проблеми з RTSP", message))
+                    self.root.after(0, lambda: self.status_var.set("Проблеми з RTSP"))
+                    
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("❌ Помилка", f"Помилка тестування: {str(e)}"))
+                self.root.after(0, lambda: self.status_var.set("Помилка тестування"))
+        
+        # Запускаємо тест в окремому потоці
+        thread = threading.Thread(target=test_in_thread)
+        thread.daemon = True
+        thread.start()
+
+    # ========================================================================
+    # МЕТОДИ ЗБЕРЕЖЕННЯ НАЛАШТУВАНЬ
+    # ========================================================================
+
+    def save_all(self):
+        """Збереження всіх основних налаштувань"""
+        # Валідація даних
+        ip = self.ip_entry.get().strip()
+        if ip and not validate_ip_address(ip):
+            messagebox.showerror("Помилка", "Некоректна IP-адреса камери!")
+            return
+        
+        # Валідація шляху збереження
+        save_path = self.save_path_var.get()
+        if not save_path:
+            messagebox.showerror("Помилка", "Оберіть папку для збереження!")
+            return
+        
+        self.config["telegram_token"] = self.token_entry.get().strip()
+        self.config["telegram_chat_id"] = self.chat_entry.get().strip()
+        self.config["camera_ip"] = ip
+        self.config["camera_login"] = self.login_entry.get().strip()
+        self.config["camera_password"] = self.pass_entry.get()
+        self.config["use_recorder"] = self.use_recorder_var.get()
+        self.config["save_folder"] = save_path
+        
+        # Створюємо папку збереження
+        ensure_save_folder(save_path)
+        
+        if save_config(self.config):
+            self.processor = BarcodeProcessor(self.config)
+            logging.info("Збережено всі налаштування.")
+            messagebox.showinfo("✅ Збережено", "Налаштування успішно збережено!")
+            self.status_var.set("Налаштування збережено")
+        else:
+            messagebox.showerror("❌ Помилка", "Не вдалося зберегти налаштування!")
+            self.status_var.set("Помилка збереження")
+
+    def save_recorder_settings(self):
+        """Збереження налаштувань RTSP реєстратора"""
+        # Валідація IP реєстратора
+        recorder_ip = self.recorder_ip_entry.get().strip()
+        if recorder_ip and not validate_ip_address(recorder_ip):
+            messagebox.showerror("Помилка", "Некоректна IP-адреса реєстратора!")
+            return
+        
+        # Валідація порту
+        port = self.recorder_port_entry.get().strip()
+        if port and not port.isdigit():
+            messagebox.showerror("Помилка", "Порт має бути числом!")
+            return
+        
+        # Валідація каналу
+        channel = self.recorder_channel_entry.get().strip()
+        if channel and not channel.isdigit():
+            messagebox.showerror("Помилка", "Канал має бути числом!")
+            return
+        
+        self.config["recorder_ip"] = recorder_ip
+        self.config["recorder_port"] = port if port else "554"
+        self.config["recorder_login"] = self.recorder_login_entry.get().strip()
+        self.config["recorder_password"] = self.recorder_pass_entry.get()
+        self.config["recorder_channel"] = channel if channel else "1"
+        self.config["recorder_rtsp_template"] = self.template_var.get()
+        
+        if save_config(self.config):
+            self.processor = BarcodeProcessor(self.config)
+            logging.info("Збережено налаштування RTSP реєстратора.")
+            messagebox.showinfo("✅ Збережено", "Налаштування RTSP реєстратора успішно збережено!")
+            self.status_var.set("Налаштування RTSP збережено")
+        else:
+            messagebox.showerror("❌ Помилка", "Не вдалося зберегти налаштування!")
+            self.status_var.set("Помилка збереження")
+
+    # ========================================================================
+    # МЕТОДИ ОЧИЩЕННЯ
+    # ========================================================================
+
+    def cleanup_old_files_dialog(self):
+        """Діалог для очищення старих файлів"""
+        result = messagebox.askyesnocancel("🗑️ Очищення файлів", 
+                                          "Видалити всі файли та папки сесій старше 2 тижнів?\n\n⚠️ Ця дія незворотня!", 
+                                          icon="warning")
+        
+        if result:
+            self.status_var.set("Очищення файлів...")
+            self.root.update()
+            
+            def cleanup_in_thread():
+                try:
+                    deleted_count = cleanup_old_files()
+                    
+                    if deleted_count >= 0:
+                        self.root.after(0, lambda: messagebox.showinfo("✅ Очищення завершено", 
+                                                                       f"Видалено файлів: {deleted_count}"))
+                        self.root.after(0, lambda: self.status_var.set(f"Очищено {deleted_count} файлів"))
+                    else:
+                        self.root.after(0, lambda: messagebox.showerror("❌ Помилка", "Помилка при очищенні файлів"))
+                        self.root.after(0, lambda: self.status_var.set("Помилка очищення"))
+                        
+                except Exception as e:
+                    self.root.after(0, lambda: messagebox.showerror("❌ Помилка", f"Помилка очищення: {str(e)}"))
+                    self.root.after(0, lambda: self.status_var.set("Помилка очищення"))
+            
+            # Запускаємо очищення в окремому потоці
+            thread = threading.Thread(target=cleanup_in_thread)
+            thread.daemon = True
+            thread.start()
+
+    # ========================================================================
+    # ОСНОВНІ МЕТОДИ РОБОТИ
+    # ========================================================================
+
+    # ========================================================================
+    # МЕТОДИ РОБОТИ
+    # ========================================================================
+
+    def browse_save_folder(self):
+        """Вибір папки для збереження"""
+        folder = filedialog.askdirectory(
+            title="Оберіть папку для збереження файлів",
+            initialdir=self.save_path_var.get()
+        )
+        
+        if folder:
+            # Додаємо підпапку SkanerFoto
+            save_path = Path(folder) / "SkanerFoto"
+            self.save_path_var.set(str(save_path))
+            self.status_var.set(f"Обрано папку: {save_path}")
+
+    def scan_input_entered(self, event):
+        """Обробка введення коду зі сканера"""
+        # Перевіряємо, чи фокус на полі сканування
+        if self.root.focus_get() == self.scan_entry:
+            code = self.scan_entry.get().strip()
+            if code:
+                logging.info(f"Введено код у сканер: {code}")
+                self.status_var.set("Обробка коду...")
+                self.root.update()
+                
+                try:
+                    result = self.processor.process_code(code)
+                    self.status_var.set(result)
+                except Exception as e:
+                    error_msg = f"Помилка обробки: {str(e)}"
+                    logging.error(error_msg)
+                    self.status_var.set(error_msg)
+                    messagebox.showerror("Помилка", error_msg)
+                
+                self.scan_entry.delete(0, tk.END)
+
+
+# ============================================================================
+# ТОЧКА ВХОДУ В ПРОГРАМУ
+# ============================================================================
+
+def main():
+    """Головна функція запуску програми"""
+    try:
+        root = tk.Tk()
+        app = App(root)
+        root.mainloop()
+    except Exception as e:
+        logging.error(f"Критична помилка: {e}")
+        print(f"Критична помилка: {e}")
+
+
+if __name__ == "__main__":
+    main()
